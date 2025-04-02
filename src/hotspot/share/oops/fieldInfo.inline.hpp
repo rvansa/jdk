@@ -33,6 +33,48 @@
 #include "runtime/atomic.hpp"
 #include "utilities/checkedCast.hpp"
 
+#define COMMON_FLAGS_LENGTH 32
+static const u2 common_access_flags[COMMON_FLAGS_LENGTH] = {
+  JVM_ACC_PRIVATE | JVM_ACC_FINAL,
+  JVM_ACC_PRIVATE,
+  JVM_ACC_PRIVATE | JVM_ACC_STATIC | JVM_ACC_FINAL,
+  JVM_ACC_PUBLIC | JVM_ACC_STATIC | JVM_ACC_FINAL,
+  JVM_ACC_PUBLIC | JVM_ACC_STATIC | JVM_ACC_FINAL | JVM_ACC_ENUM,
+  JVM_ACC_PRIVATE | JVM_ACC_STATIC | JVM_ACC_FINAL,
+  JVM_ACC_PRIVATE | JVM_ACC_FINAL,
+  JVM_ACC_PROTECTED,
+  JVM_ACC_PROTECTED | JVM_ACC_FINAL,
+  JVM_ACC_PUBLIC | JVM_ACC_STATIC | JVM_ACC_FINAL,
+  JVM_ACC_STATIC | JVM_ACC_FINAL,
+  JVM_ACC_PRIVATE | JVM_ACC_STATIC | JVM_ACC_FINAL,
+  JVM_ACC_PRIVATE | JVM_ACC_VOLATILE,
+  JVM_ACC_PRIVATE,
+  JVM_ACC_STATIC | JVM_ACC_FINAL,
+  0,
+  JVM_ACC_FINAL | JVM_ACC_SYNTHETIC,
+  JVM_ACC_PROTECTED | JVM_ACC_STATIC | JVM_ACC_FINAL,
+  JVM_ACC_PRIVATE | JVM_ACC_STATIC | JVM_ACC_FINAL | JVM_ACC_SYNTHETIC,
+  JVM_ACC_PROTECTED | JVM_ACC_STATIC | JVM_ACC_FINAL,
+  JVM_ACC_FINAL,
+  JVM_ACC_PROTECTED | JVM_ACC_FINAL,
+  JVM_ACC_STATIC | JVM_ACC_FINAL | JVM_ACC_SYNTHETIC,
+  JVM_ACC_PRIVATE | JVM_ACC_STATIC,
+  JVM_ACC_PROTECTED,
+  JVM_ACC_PRIVATE | JVM_ACC_TRANSIENT,
+  JVM_ACC_PUBLIC,
+  0,
+  JVM_ACC_PRIVATE | JVM_ACC_VOLATILE,
+  JVM_ACC_PUBLIC | JVM_ACC_STATIC | JVM_ACC_FINAL,
+  JVM_ACC_FINAL,
+  JVM_ACC_PUBLIC | JVM_ACC_FINAL,
+};
+static const u1 common_field_flags[COMMON_FLAGS_LENGTH] = {
+  0x0, 0x0, 0x0, 0x1, 0x0, 0x1, 0x4, 0x0,
+  0x0, 0x0, 0x0, 0x4, 0x0, 0x4, 0x1, 0x0,
+  0x0, 0x0, 0x0, 0x1, 0x0, 0x4, 0x0, 0x0,
+  0x4, 0x0, 0x0, 0x4, 0x4, 0x4, 0x4, 0x0,
+};
+
 inline Symbol* FieldInfo::name(ConstantPool* cp) const {
   int index = _name_index;
   if (_field_flags.is_injected()) {
@@ -75,8 +117,20 @@ inline void Mapper<CON>::map_field_info(const FieldInfo& fi) {
     _consumer->accept_uint(fi.signature_index());
   }
   _consumer->accept_uint(fi.offset());
-  _consumer->accept_uint(fi.access_flags().as_field_flags());
-  _consumer->accept_uint(fi.field_flags().as_uint());
+  u2 access_flags = fi.access_flags().as_field_flags();
+  u4 field_flags = fi.field_flags().as_uint();
+  uint32_t common_index;
+  for (common_index = 0; common_index < COMMON_FLAGS_LENGTH; ++common_index) {
+    if (common_access_flags[common_index] == access_flags && common_field_flags[common_index] == field_flags) {
+      break;
+    }
+  }
+  if (common_index >= COMMON_FLAGS_LENGTH) {
+    _consumer->accept_uint(access_flags + COMMON_FLAGS_LENGTH);
+    _consumer->accept_uint(field_flags);
+  } else {
+    _consumer->accept_uint(common_index);
+  }
   if(fi.field_flags().has_any_optionals()) {
     if (fi.field_flags().is_initialized()) {
       _consumer->accept_uint(fi.initializer_index());
@@ -111,8 +165,14 @@ inline void FieldInfoReader::read_name_signature(FieldInfo& fi, bool signature_f
 
 inline void FieldInfoReader::read_partial_record(FieldInfo& fi) {
   fi._offset = next_uint();
-  fi._access_flags = AccessFlags(checked_cast<u2>(next_uint()));
-  fi._field_flags = FieldInfo::FieldFlags(next_uint());
+  uint32_t common_flags = next_uint();
+  if (common_flags >= COMMON_FLAGS_LENGTH) {
+    fi._access_flags = AccessFlags(checked_cast<u2>(common_flags - COMMON_FLAGS_LENGTH));
+    fi._field_flags = FieldInfo::FieldFlags(next_uint());
+  } else {
+    fi._access_flags = AccessFlags(common_access_flags[common_flags]);
+    fi._field_flags = FieldInfo::FieldFlags(common_field_flags[common_flags]);
+  }
   if (fi._field_flags.is_initialized()) {
     fi._initializer_index = checked_cast<u2>(next_uint());
   } else {

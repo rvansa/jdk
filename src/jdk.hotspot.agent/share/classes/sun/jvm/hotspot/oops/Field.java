@@ -33,6 +33,7 @@ import sun.jvm.hotspot.utilities.*;
 // Super class for all fields in an object
 public class Field {
   private static final int SIGNATURE_FOLLOWS = 0x40;
+  private static final int COMMON_FLAGS_LENGTH = 32;
 
   Field(FieldIdentifier id, long offset, boolean isVMField) {
     this.offset    = offset;
@@ -96,8 +97,14 @@ public class Field {
       fieldInfoValues.signatureIndex = crs.readInt();          // read signature index
     }
     fieldInfoValues.offset = crs.readInt();                    // read offset
-    fieldInfoValues.accessFlags = crs.readInt();               // read access flags
-    fieldInfoValues.fieldFlags = crs.readInt();                // read field flags
+    int commonFlags = crs.readInt();
+    if (commonFlags >= COMMON_FLAGS_LENGTH) {
+      fieldInfoValues.accessFlags = commonFlags - COMMON_FLAGS_LENGTH;
+      fieldInfoValues.fieldFlags = crs.readInt();                // read field flags
+    } else {
+      // TODO
+      throw new UnsupportedOperationException("NOT IMPLEMENTED");
+    }
                                                                // Optional reads:
     if (fieldIsInitialized(fieldInfoValues.fieldFlags)) {
         fieldInfoValues.initialValueIndex = crs.readInt();     // read initial value index

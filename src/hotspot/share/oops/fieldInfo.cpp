@@ -51,8 +51,8 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(GrowableArray<FieldInfo>* fie
                                                           ClassLoaderData* loader_data, TRAPS) {
   // The stream format described in fieldInfo.hpp is:
   //   FieldInfoStream := j=num_java_fields k=num_injected_fields ControlByte[j+k] Field[j+k] End
-  //   ControlByte := injected_field_flag(1 bit) unused(1 bit) encoded_field_length(6 bits)
-  //   Field := name sig offset access flags Optionals(flags)
+  //   ControlByte := injected_field_flag(1 bit) signature_follows_flag(1 bit) encoded_field_length(6 bits)
+  //   Field := name sig?[!signature_follows_flag] offset access flags Optionals(flags)
   //   Optionals(i) := initval?[i&is_init]     // ConstantValue attr
   //                   gsig?[i&is_generic]     // signature attr
   //                   group?[i&is_contended]  // Contended anno (group)
@@ -92,6 +92,9 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(GrowableArray<FieldInfo>* fie
     if (fi->field_flags().is_injected()) {
       control_byte |= INJECTED_FIELD;
     }
+    if (fi->signature_index() == fi->name_index() + 1) {
+      control_byte |= SIGNATURE_FOLLOWS;
+    }
     w.array()->at_put(ctrl + i, control_byte);
   }
 
@@ -101,10 +104,11 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(GrowableArray<FieldInfo>* fie
   assert(jfc == java_fields, "Must be");
   int ifc = r.next_uint();
   assert(ifc == injected_fields, "Must be");
+  int ctrl_offset = r.position();
   r.skip_bytes(jfc + ifc);
   for (int i = 0; i < jfc + ifc; i++) {
     FieldInfo fi;
-    r.read_field_info(fi);
+    r.read_field_info(fi, fis->at(ctrl_offset + i) & SIGNATURE_FOLLOWS);
     FieldInfo* fi_ref = fields->adr_at(i);
     assert(fi_ref->name_index() == fi.name_index(), "Must be");
     assert(fi_ref->signature_index() == fi.signature_index(), "Must be");
@@ -133,10 +137,11 @@ GrowableArray<FieldInfo>* FieldInfoStream::create_FieldInfoArray(const Array<u1>
   int length = *java_fields_count + *injected_fields_count;
 
   GrowableArray<FieldInfo>* array = new GrowableArray<FieldInfo>(length);
+  int ctrl_offset = r.position();
   r.skip_bytes(length);
   while (r.has_next()) {
     FieldInfo fi;
-    r.read_field_info(fi);
+    r.read_field_info(fi, fis->at(ctrl_offset + r.next_index()) & SIGNATURE_FOLLOWS);
     array->append(fi);
   }
   assert(array->length() == length, "Must be");
@@ -147,10 +152,11 @@ void FieldInfoStream::print_from_fieldinfo_stream(Array<u1>* fis, outputStream* 
   FieldInfoReader r(fis);
   int java_fields_count = r.next_uint();
   int injected_fields_count = r.next_uint();
+  int ctrl_offset = r.position();
   r.skip_bytes(java_fields_count + injected_fields_count);
   while (r.has_next()) {
     FieldInfo fi;
-    r.read_field_info(fi);
+    r.read_field_info(fi, fis->at(ctrl_offset + r.next_index()) & SIGNATURE_FOLLOWS);
     fi.print(os, cp);
   }
 }

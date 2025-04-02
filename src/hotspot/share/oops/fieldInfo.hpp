@@ -30,8 +30,11 @@
 #include "utilities/unsigned5.hpp"
 #include "utilities/vmEnums.hpp"
 
+// Field is injected; duplicates field_flags().is_injected().
 #define INJECTED_FIELD ((u1) 0x80)
-#define CTRL_LENGTH_MASK ~((int) INJECTED_FIELD)
+// signature index = name index + 1
+#define SIGNATURE_FOLLOWS ((u1) 0x40)
+#define CTRL_LENGTH_MASK ~(INJECTED_FIELD | SIGNATURE_FOLLOWS)
 
 static constexpr u4 flag_mask(int pos) {
   return (u4)1 << pos;
@@ -251,11 +254,11 @@ public:
   int has_next() const { return _r.has_next(); }
   int position() const { return _r.position(); }
   int next_index() const { return _next_index; }
-  void read_name_signature(FieldInfo& fi);
+  void read_name_signature(FieldInfo& fi, bool signature_follows);
   void read_partial_record(FieldInfo& fi);
 
-  inline void read_field_info(FieldInfo& fi) {
-    read_name_signature(fi);
+  inline void read_field_info(FieldInfo& fi, bool signature_follows) {
+    read_name_signature(fi, signature_follows);
     read_partial_record(fi);
   }
   // skip a whole field record, both required and optional bits
@@ -273,8 +276,8 @@ public:
 // integers organized like this:
 //
 //   FieldInfoStream := j=num_java_fields k=num_injected_fields ControlByte[j+k] Field[j+k] End
-//   ControlByte := injected_field_flag(1 bit) unused(1 bit) encoded_field_length(6 bits)
-//   Field := name sig offset access flags Optionals(flags)
+//   ControlByte := injected_field_flag(1 bit) signature_follows_flag(1 bit) encoded_field_length(6 bits)
+//   Field := name sig?[!signature_follows_flag] offset access flags Optionals(flags)
 //   Optionals(i) := initval?[i&is_init]     // ConstantValue attr
 //                   gsig?[i&is_generic]     // signature attr
 //                   group?[i&is_contended]  // Contended anno (group)

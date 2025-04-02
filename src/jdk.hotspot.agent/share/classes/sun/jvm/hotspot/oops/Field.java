@@ -32,6 +32,7 @@ import sun.jvm.hotspot.utilities.*;
 
 // Super class for all fields in an object
 public class Field {
+  private static final int SIGNATURE_FOLLOWS = 0x40;
 
   Field(FieldIdentifier id, long offset, boolean isVMField) {
     this.offset    = offset;
@@ -86,10 +87,14 @@ public class Field {
   //   End = 0
   //
 
-  static FieldInfoValues readFieldInfoValues(CompressedReadStream crs) {
+  static FieldInfoValues readFieldInfoValues(CompressedReadStream crs, boolean signatureFollows) {
     FieldInfoValues fieldInfoValues = new FieldInfoValues();
     fieldInfoValues.nameIndex = crs.readInt();                 // read name_index
-    fieldInfoValues.signatureIndex = crs.readInt();            // read signature index
+    if (signatureFollows) {
+      fieldInfoValues.signatureIndex = fieldInfoValues.nameIndex + 1;
+    } else {
+      fieldInfoValues.signatureIndex = crs.readInt();          // read signature index
+    }
     fieldInfoValues.offset = crs.readInt();                    // read offset
     fieldInfoValues.accessFlags = crs.readInt();               // read access flags
     fieldInfoValues.fieldFlags = crs.readInt();                // read field flags
@@ -111,10 +116,11 @@ public class Field {
     int numJavaFields = crs.readInt();     // read num_java_fields
     int numInjectedFields = crs.readInt(); // read num_injected_fields;
     int numFields = numJavaFields + numInjectedFields;
+    int ctrlOffset = crs.getPosition();
     crs.skipBytes(numFields);
     Field[] fields = new Field[numFields];
     for (int i = 0; i < numFields; i++) {
-      FieldInfoValues values = readFieldInfoValues(crs);
+      FieldInfoValues values = readFieldInfoValues(crs, (crs.readByte(ctrlOffset + i) & SIGNATURE_FOLLOWS) != 0);
       fields[i] = new Field(kls, i, values);
     }
     return fields;

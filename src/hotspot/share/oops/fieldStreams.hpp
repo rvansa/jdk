@@ -67,7 +67,7 @@ class FieldStreamBase : public StackObj {
   void read_next() {
     int ctrl_byte = _fieldinfo_stream->at(_ctrl_offset + _index);
     _next_field_offset += ctrl_byte & CTRL_LENGTH_MASK;
-    _reader.read_name_signature(_fi_buf);
+    _reader.read_name_signature(_fi_buf, ctrl_byte & SIGNATURE_FOLLOWS);
     _fi_buf.field_flags_addr()->update_injected(ctrl_byte & INJECTED_FIELD);
   }
 
@@ -82,6 +82,7 @@ class FieldStreamBase : public StackObj {
       read_next();
     }
    }
+
  public:
   inline FieldStreamBase(InstanceKlass* klass);
 

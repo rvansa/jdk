@@ -71,7 +71,9 @@ template<typename CON>
 inline void Mapper<CON>::map_field_info(const FieldInfo& fi) {
   _next_index++;  // pre-increment
   _consumer->accept_uint(fi.name_index());
-  _consumer->accept_uint(fi.signature_index());
+  if (fi.signature_index() != fi.name_index() + 1) {
+    _consumer->accept_uint(fi.signature_index());
+  }
   _consumer->accept_uint(fi.offset());
   _consumer->accept_uint(fi.access_flags().as_field_flags());
   _consumer->accept_uint(fi.field_flags().as_uint());
@@ -97,10 +99,14 @@ inline FieldInfoReader::FieldInfoReader(const Array<u1>* fi)
   : _r(fi->data(), 0),
     _next_index(0) { }
 
-inline void FieldInfoReader::read_name_signature(FieldInfo& fi) {
+inline void FieldInfoReader::read_name_signature(FieldInfo& fi, bool signature_follows) {
   fi._index = _next_index++;
   fi._name_index = checked_cast<u2>(next_uint());
-  fi._signature_index = checked_cast<u2>(next_uint());
+  if (signature_follows) {
+    fi._signature_index = fi._name_index + 1;
+  } else {
+    fi._signature_index = checked_cast<u2>(next_uint());
+  }
 }
 
 inline void FieldInfoReader::read_partial_record(FieldInfo& fi) {

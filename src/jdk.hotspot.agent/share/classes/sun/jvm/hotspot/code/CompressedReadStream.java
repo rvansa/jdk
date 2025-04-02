@@ -47,6 +47,10 @@ public class CompressedReadStream extends CompressedStream {
     return (byte) read();
   }
 
+  public byte readByte(int index) {
+    return (byte) read(index);
+  }
+
   public char readChar() {
     return (char) readInt();
   }

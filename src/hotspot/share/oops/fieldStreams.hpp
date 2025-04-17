@@ -72,8 +72,12 @@ class FieldStreamBase : public StackObj {
   }
 
    void initialize() {
-    int java_fields_count = _reader.next_uint();
-    int injected_fields_count = _reader.next_uint();
+    int java_fields_count;
+    int injected_fields_count;
+    _reader.read_field_counts(&java_fields_count, &injected_fields_count);
+    if (java_fields_count > JUMP_TABLE_STRIDE) {
+      _reader.skip_bytes(sizeof(uint32_t));
+    }
     _ctrl_offset = _reader.position();
     _reader.skip_bytes(java_fields_count + injected_fields_count);
     assert( _limit <= java_fields_count + injected_fields_count, "Safety check");
@@ -83,6 +87,7 @@ class FieldStreamBase : public StackObj {
     }
    }
  public:
+
   inline FieldStreamBase(InstanceKlass* klass);
 
   // accessors
@@ -186,6 +191,8 @@ class JavaFieldStream : public FieldStreamBase {
     assert(!_fi_buf.field_flags().is_injected(), "regular only");
     return _fi_buf.initializer_index();
   }
+
+  void skip_fields_until(const Symbol *name, ConstantPool *cp);
 };
 
 

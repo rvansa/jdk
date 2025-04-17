@@ -47,16 +47,45 @@ void FieldInfo::print_from_growable_array(outputStream* os, GrowableArray<FieldI
   }
 }
 
-Array<u1>* FieldInfoStream::create_FieldInfoStream(GrowableArray<FieldInfo>* fields, int java_fields, int injected_fields,
+static int compare_symbols(const Symbol *s1, const Symbol *s2) {
+  // not lexicographical sort, since we need only total ordering
+  int l1 = s1->utf8_length();
+  int l2 = s2->utf8_length();
+  if (l1 == l2) {
+    for (int i = 0; i < l1; ++i) {
+      char c1 = s1->char_at(i);
+      char c2 = s2->char_at(i);
+      if (c1 != c2) {
+        return c1 - c2;
+      }
+    }
+    return 0;
+  } else {
+    return l1 - l2;
+  }
+}
+
+static int compare_fields(const FieldInfo *f1, const FieldInfo *f2, void *arg) {
+  ConstantPool* cp = static_cast<ConstantPool*>(arg);
+  return compare_symbols(f1->name(cp), f2->name(cp));
+}
+
+Array<u1>* FieldInfoStream::create_FieldInfoStream(ConstantPool* constants, GrowableArray<FieldInfo>* fields, int java_fields, int injected_fields,
                                                           ClassLoaderData* loader_data, TRAPS) {
   // The stream format described in fieldInfo.hpp is:
-  //   FieldInfoStream := j=num_java_fields k=num_injected_fields ControlByte[j+k] Field[j+k] End
+  //   FieldInfoStream := j=num_java_fields k=num_injected_fields JumpTable_offset(0/4 bytes) ControlByte[j+k] Field[j+k] JumpTable[(j - 1)/16 > 0] End
+  //   JumpTable := stream_index{(j - 1)/16}
   //   ControlByte := injected_field_flag(1 bit) unused(1 bit) encoded_field_length(6 bits)
   //   Field := name sig offset access flags Optionals(flags)
   //   Optionals(i) := initval?[i&is_init]     // ConstantValue attr
   //                   gsig?[i&is_generic]     // signature attr
   //                   group?[i&is_contended]  // Contended anno (group)
   //   End = 0
+
+  // We create JumpTable only for java_fields; JavaFieldStream relies on non-injected fields precede injected
+  if (java_fields > JUMP_TABLE_STRIDE) {
+    fields->sort_range(0, java_fields, compare_fields, constants);
+  }
 
   using StreamSizer = UNSIGNED5::Sizer<>;
   using StreamFieldSizer = Mapper<StreamSizer>;
@@ -65,12 +94,28 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(GrowableArray<FieldInfo>* fie
 
   sizer.consumer()->accept_uint(java_fields);
   sizer.consumer()->accept_uint(injected_fields);
-  sizer.consumer()->accept_bytes(java_fields + injected_fields);
+  int jump_table_offset_pos = sizer.consumer()->position();
+  assert(fields->length() == java_fields + injected_fields, "must be");
+  // We need to put JumpTable at end because the position of fields must not depend
+  // on the size of JumpTable.
+  if (java_fields > JUMP_TABLE_STRIDE) {
+    sizer.consumer()->accept_bytes(sizeof(uint32_t));
+  }
+  sizer.consumer()->accept_bytes(fields->length());
+  int *positions = java_fields > JUMP_TABLE_STRIDE ? NEW_RESOURCE_ARRAY(int, (java_fields - 1) / JUMP_TABLE_STRIDE) : nullptr;
   for (int i = 0; i < fields->length(); i++) {
+    if (i > 0 && i < java_fields && i % JUMP_TABLE_STRIDE == 0) {
+      positions[i / JUMP_TABLE_STRIDE - 1] = sizer.consumer()->position();
+    }
     FieldInfo* fi = fields->adr_at(i);
     sizer.map_field_info(*fi);
   }
-  int storage_size = sizer.consumer()->position() + 1;
+  for (int i = JUMP_TABLE_STRIDE; i < java_fields; i += JUMP_TABLE_STRIDE) {
+    sizer.consumer()->accept_uint(positions[i / JUMP_TABLE_STRIDE - 1]);
+  }
+  // Originally there was an extra byte with 0 terminating the reading;
+  // no we check limits instead as there may be the JumpTable
+  int storage_size = sizer.consumer()->position();
   Array<u1>* const fis = MetadataFactory::new_array<u1>(loader_data, storage_size, CHECK_NULL);
 
   using StreamWriter = UNSIGNED5::Writer<Array<u1>*, int, ArrayHelper<Array<u1>*, int>>;
@@ -81,10 +126,14 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(GrowableArray<FieldInfo>* fie
   writer.consumer()->accept_uint(java_fields);
   writer.consumer()->accept_uint(injected_fields);
   int ctrl = w.position();
-  w.set_position(ctrl + java_fields + injected_fields);
+  if (java_fields > JUMP_TABLE_STRIDE) {
+    ctrl += sizeof(uint32_t);
+  }
+  w.set_position(ctrl + fields->length());
   for (int i = 0; i < fields->length(); i++) {
     FieldInfo* fi = fields->adr_at(i);
     int pre = w.position();
+    assert(i == 0 || i >= java_fields || i % JUMP_TABLE_STRIDE != 0 || pre == positions[i / JUMP_TABLE_STRIDE - 1], "must be");
     writer.map_field_info(*fi);
     int post = w.position();
     u1 control_byte = static_cast<u1>(post - pre);
@@ -94,13 +143,22 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(GrowableArray<FieldInfo>* fie
     }
     w.array()->at_put(ctrl + i, control_byte);
   }
+  if (java_fields > JUMP_TABLE_STRIDE) {
+    *reinterpret_cast<uint32_t*>(w.array()->adr_at(jump_table_offset_pos)) = checked_cast<uint32_t>(w.position());
+  }
+  for (int i = JUMP_TABLE_STRIDE; i < java_fields; i += JUMP_TABLE_STRIDE) {
+    writer.consumer()->accept_uint(positions[i / JUMP_TABLE_STRIDE - 1]);
+  }
 
 #ifdef ASSERT
   FieldInfoReader r(fis);
-  int jfc = r.next_uint();
+  int jfc, ifc;
+  r.read_field_counts(&jfc, &ifc);
   assert(jfc == java_fields, "Must be");
-  int ifc = r.next_uint();
   assert(ifc == injected_fields, "Must be");
+  if (java_fields > JUMP_TABLE_STRIDE) {
+    r.skip_bytes(sizeof(uint32_t));
+  }
   r.skip_bytes(jfc + ifc);
   for (int i = 0; i < jfc + ifc; i++) {
     FieldInfo fi;
@@ -128,11 +186,13 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(GrowableArray<FieldInfo>* fie
 
 GrowableArray<FieldInfo>* FieldInfoStream::create_FieldInfoArray(const Array<u1>* fis, int* java_fields_count, int* injected_fields_count) {
   FieldInfoReader r(fis);
-  *java_fields_count = r.next_uint();
-  *injected_fields_count = r.next_uint();
+  r.read_field_counts(java_fields_count, injected_fields_count);
   int length = *java_fields_count + *injected_fields_count;
 
   GrowableArray<FieldInfo>* array = new GrowableArray<FieldInfo>(length);
+  if (*java_fields_count > JUMP_TABLE_STRIDE) {
+    r.skip_bytes(sizeof(uint32_t));
+  }
   r.skip_bytes(length);
   while (r.has_next()) {
     FieldInfo fi;
@@ -145,12 +205,43 @@ GrowableArray<FieldInfo>* FieldInfoStream::create_FieldInfoArray(const Array<u1>
 
 void FieldInfoStream::print_from_fieldinfo_stream(Array<u1>* fis, outputStream* os, ConstantPool* cp) {
   FieldInfoReader r(fis);
-  int java_fields_count = r.next_uint();
-  int injected_fields_count = r.next_uint();
+  int java_fields_count;
+  int injected_fields_count;
+  r.read_field_counts(&java_fields_count, &injected_fields_count);
+  if (java_fields_count > JUMP_TABLE_STRIDE) {
+    r.skip_bytes(sizeof(uint32_t));
+  }
   r.skip_bytes(java_fields_count + injected_fields_count);
   while (r.has_next()) {
     FieldInfo fi;
     r.read_field_info(fi);
     fi.print(os, cp);
   }
+}
+
+int FieldInfoReader::skip_fields_until(const Symbol *name, ConstantPool *cp, int java_fields) {
+  int jump_table_size = (java_fields - 1) / JUMP_TABLE_STRIDE;
+  if (jump_table_size == 0) {
+    return -1;
+  }
+  int field_pos = -1;
+  int field_index = -1;
+  UNSIGNED5::Reader<const u1*, int> r2(_r.array());
+  r2.set_position(_r.limit());
+  for (int i = 0; i < jump_table_size; ++i) {
+    int pos = r2.next_uint();
+    int pos2 = pos; // read_uint updates this by reference
+    uint32_t name_index = UNSIGNED5::read_uint<const u1 *, int>(_r.array(), pos2, _r.limit());
+    Symbol *sym = cp->symbol_at(name_index);
+    if (compare_symbols(name, sym) < 0) {
+      break;
+    }
+    field_pos = pos;
+    field_index = (i + 1) * JUMP_TABLE_STRIDE;
+  }
+  if (field_pos >= 0) {
+    _r.set_position(field_pos);
+    _next_index = field_index;
+  }
+  return field_index;
 }

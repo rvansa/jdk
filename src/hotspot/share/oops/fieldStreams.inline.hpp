@@ -65,4 +65,20 @@ FieldStreamBase::FieldStreamBase(InstanceKlass* klass) :
   initialize();
 }
 
+inline void JavaFieldStream::skip_fields_until(const Symbol *name, ConstantPool *cp) {
+  if (done()) {
+    return;
+  }
+  int index = _reader.skip_fields_until(name, cp, _limit);
+  if (index < 0) {
+    return;
+  }
+  assert(index > 0 && index < _limit && index % JUMP_TABLE_STRIDE == 0, "must be");
+  _index = index;
+  int ctrl_byte = _fieldinfo_stream->at(_ctrl_offset + index);
+  _next_field_offset = _reader.position() + (ctrl_byte & CTRL_LENGTH_MASK);
+  _reader.read_name_signature(_fi_buf);
+  _fi_buf.field_flags_addr()->update_injected(ctrl_byte & INJECTED_FIELD);
+}
+
 #endif // SHARE_OOPS_FIELDSTREAMS_INLINE_HPP

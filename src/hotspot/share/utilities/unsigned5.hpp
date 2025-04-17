@@ -286,6 +286,7 @@ class UNSIGNED5 : AllStatic {
     ARR array() { return _array; }
     OFF limit() const { return _limit; }
     OFF position() const { return _position; }
+    void set_limit(OFF limit) { _limit = limit; }
     void set_position(OFF position) { _position = position; }
 
     // For debugging, even in product builds (see debug.cpp).

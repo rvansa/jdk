@@ -111,7 +111,7 @@ public class Field {
     int numJavaFields = crs.readInt();     // read num_java_fields
     int numInjectedFields = crs.readInt(); // read num_injected_fields;
     int numFields = numJavaFields + numInjectedFields;
-    crs.skipBytes(numFields);
+    crs.skipBytes((numJavaFields > 16 ? 4 : 0) + numFields);
     Field[] fields = new Field[numFields];
     for (int i = 0; i < numFields; i++) {
       FieldInfoValues values = readFieldInfoValues(crs);

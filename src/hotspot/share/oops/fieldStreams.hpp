@@ -42,21 +42,16 @@ class FieldStreamBase : public StackObj {
  protected:
   const Array<u1>*    _fieldinfo_stream;
   FieldInfoReader     _reader;
-  int                 _ctrl_offset;
   constantPoolHandle  _constants;
   int                 _index;
   int                 _limit;
 
   FieldInfo           _fi_buf;
   fieldDescriptor     _fd_buf;
-  int                 _next_field_offset;
 
-  void ensure_info() {
+  FieldInfo const * field() const {
     assert(!done(), "no more fields");
-    if (_next_field_offset > _reader.position()) {
-      _reader.read_partial_record(_fi_buf);
-      _next_field_offset = _reader.position();
-    }
+    return &_fi_buf;
   }
 
   inline FieldStreamBase(const Array<u1>* fieldinfo_stream, ConstantPool* constants, int start, int limit);
@@ -64,13 +59,6 @@ class FieldStreamBase : public StackObj {
   inline FieldStreamBase(const Array<u1>* fieldinfo_stream, ConstantPool* constants);
 
  private:
-  void read_next() {
-    int ctrl_byte = _fieldinfo_stream->at(_ctrl_offset + _index);
-    _next_field_offset += ctrl_byte & CTRL_LENGTH_MASK;
-    _reader.read_name_signature(_fi_buf);
-    _fi_buf.field_flags_addr()->update_injected(ctrl_byte & INJECTED_FIELD);
-  }
-
    void initialize() {
     int java_fields_count;
     int injected_fields_count;
@@ -78,12 +66,9 @@ class FieldStreamBase : public StackObj {
     if (java_fields_count > JUMP_TABLE_STRIDE) {
       _reader.skip_bytes(sizeof(uint32_t));
     }
-    _ctrl_offset = _reader.position();
-    _reader.skip_bytes(java_fields_count + injected_fields_count);
     assert( _limit <= java_fields_count + injected_fields_count, "Safety check");
     if (_limit != 0) {
-      _next_field_offset = _reader.position();
-      read_next();
+      _reader.read_field_info(_fi_buf);
     }
    }
  public:
@@ -96,58 +81,51 @@ class FieldStreamBase : public StackObj {
 
   void next() {
     _index += 1;
-    _reader.set_position_and_next_index(_next_field_offset, _index);
     if (done()) return;
-    read_next();
+    _reader.read_field_info(_fi_buf);
   }
   bool done() const { return _index >= _limit; }
 
   // Accessors for current field
-  AccessFlags access_flags() {
-    ensure_info();
-    return _fi_buf.access_flags();
+  AccessFlags access_flags() const {
+    return field()->access_flags();
   }
 
-  FieldInfo::FieldFlags field_flags() {
-    ensure_info();
-    return _fi_buf.field_flags();
+  FieldInfo::FieldFlags field_flags() const {
+    return field()->field_flags();
   }
 
   Symbol* name() const {
-    return _fi_buf.name(_constants());
+    return field()->name(_constants());
   }
 
   Symbol* signature() const {
-    return _fi_buf.signature(_constants());
+    return field()->signature(_constants());
   }
 
-  Symbol* generic_signature() {
-    if (_fi_buf.field_flags().is_generic()) {
-      return _constants->symbol_at(_fi_buf.generic_signature_index());
+  Symbol* generic_signature() const {
+    if (field()->field_flags().is_generic()) {
+      return _constants->symbol_at(field()->generic_signature_index());
     } else {
       return nullptr;
     }
   }
 
-  int offset() {
-    ensure_info();
-    return _fi_buf.offset();
+  int offset() const {
+    return field()->offset();
   }
 
   bool is_contended() const {
-    assert(_next_field_offset == _reader.position(), "unexpected");
-    return _fi_buf.is_contended();
+    return field()->is_contended();
   }
 
   int contended_group() const {
-    assert(_next_field_offset == _reader.position(), "unexpected");
-    return _fi_buf.contended_group();
+    return field()->contended_group();
   }
 
   // Convenient methods
 
-  const FieldInfo& to_FieldInfo() {
-    ensure_info();
+  const FieldInfo& to_FieldInfo() const {
     return _fi_buf;
   }
 
@@ -156,8 +134,7 @@ class FieldStreamBase : public StackObj {
   }
 
   // bridge to a heavier API:
-  fieldDescriptor& field_descriptor() {
-    ensure_info();
+  fieldDescriptor& field_descriptor() const {
     fieldDescriptor& field = const_cast<fieldDescriptor&>(_fd_buf);
     field.reinitialize(field_holder(), to_FieldInfo());
     return field;
@@ -170,26 +147,26 @@ class JavaFieldStream : public FieldStreamBase {
   JavaFieldStream(const InstanceKlass* k): FieldStreamBase(k->fieldinfo_stream(), k->constants(), 0, k->java_fields_count()) {}
 
   u2 name_index() const {
-    return _fi_buf.name_index();
+    assert(!field()->field_flags().is_injected(), "regular only");
+    return field()->name_index();
   }
 
   u2 signature_index() const {
-    return _fi_buf.signature_index();
+    assert(!field()->field_flags().is_injected(), "regular only");
+    return field()->signature_index();
   }
 
-  u2 generic_signature_index() {
-    ensure_info();
-    assert(!_fi_buf.field_flags().is_injected(), "regular only");
-    if (_fi_buf.field_flags().is_generic()) {
-      return _fi_buf.generic_signature_index();
+  u2 generic_signature_index() const {
+    assert(!field()->field_flags().is_injected(), "regular only");
+    if (field()->field_flags().is_generic()) {
+      return field()->generic_signature_index();
     }
     return 0;
   }
 
-  u2 initval_index() {
-    ensure_info();
-    assert(!_fi_buf.field_flags().is_injected(), "regular only");
-    return _fi_buf.initializer_index();
+  u2 initval_index() const {
+    assert(!field()->field_flags().is_injected(), "regular only");
+    return field()->initializer_index();
   }
 
   void skip_fields_until(const Symbol *name, ConstantPool *cp);
@@ -266,11 +243,11 @@ class HierarchicalFieldStream : public StackObj  {
 
   // bridge functions from FieldStreamBase
 
-  AccessFlags access_flags() {
+  AccessFlags access_flags() const {
     return _current_stream.access_flags();
   }
 
-  FieldInfo::FieldFlags field_flags() {
+  FieldInfo::FieldFlags field_flags() const {
     return _current_stream.field_flags();
   }
 
@@ -282,11 +259,11 @@ class HierarchicalFieldStream : public StackObj  {
     return _current_stream.signature();
   }
 
-  Symbol* generic_signature() {
+  Symbol* generic_signature() const {
     return _current_stream.generic_signature();
   }
 
-  int offset() {
+  int offset() const {
     return _current_stream.offset();
   }
 
@@ -302,7 +279,7 @@ class HierarchicalFieldStream : public StackObj  {
     return _current_stream.to_FieldInfo();
   }
 
-  fieldDescriptor& field_descriptor() {
+  fieldDescriptor& field_descriptor() const {
     return _current_stream.field_descriptor();
   }
 

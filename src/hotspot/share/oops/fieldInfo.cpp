@@ -73,16 +73,15 @@ static int compare_fields(const FieldInfo *f1, const FieldInfo *f2, void *arg) {
 Array<u1>* FieldInfoStream::create_FieldInfoStream(ConstantPool* constants, GrowableArray<FieldInfo>* fields, int java_fields, int injected_fields,
                                                           ClassLoaderData* loader_data, TRAPS) {
   // The stream format described in fieldInfo.hpp is:
-  //   FieldInfoStream := j=num_java_fields k=num_injected_fields JumpTable_offset(0/4 bytes) ControlByte[j+k] Field[j+k] JumpTable[(j - 1)/16 > 0] End
-  //   JumpTable := stream_index{(j - 1)/16}
-  //   ControlByte := injected_field_flag(1 bit) unused(1 bit) encoded_field_length(6 bits)
+  //   FieldInfoStream := j=num_java_fields k=num_injected_fields JumpTable_offset(0/4 bytes) Field[j+k] JumpTable[(j - 1)/16 > 0] End
+  //   JumpTable := stream_index[(j - 1)/16]
   //   Field := name sig offset access flags Optionals(flags)
   //   Optionals(i) := initval?[i&is_init]     // ConstantValue attr
   //                   gsig?[i&is_generic]     // signature attr
   //                   group?[i&is_contended]  // Contended anno (group)
   //   End = 0
 
-  // We create JumpTable only for java_fields; JavaFieldStream relies on non-injected fields precede injected
+  // We create JumpTable only for java_fields; JavaFieldStream relies on non-injected fields preceding injected
   if (java_fields > JUMP_TABLE_STRIDE) {
     fields->sort_range(0, java_fields, compare_fields, constants);
   }
@@ -94,14 +93,13 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(ConstantPool* constants, Grow
 
   sizer.consumer()->accept_uint(java_fields);
   sizer.consumer()->accept_uint(injected_fields);
-  int jump_table_offset_pos = sizer.consumer()->position();
   assert(fields->length() == java_fields + injected_fields, "must be");
   // We need to put JumpTable at end because the position of fields must not depend
   // on the size of JumpTable.
   if (java_fields > JUMP_TABLE_STRIDE) {
     sizer.consumer()->accept_bytes(sizeof(uint32_t));
   }
-  sizer.consumer()->accept_bytes(fields->length());
+  ResourceMark rm;
   int *positions = java_fields > JUMP_TABLE_STRIDE ? NEW_RESOURCE_ARRAY(int, (java_fields - 1) / JUMP_TABLE_STRIDE) : nullptr;
   for (int i = 0; i < fields->length(); i++) {
     if (i > 0 && i < java_fields && i % JUMP_TABLE_STRIDE == 0) {
@@ -125,23 +123,15 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(ConstantPool* constants, Grow
 
   writer.consumer()->accept_uint(java_fields);
   writer.consumer()->accept_uint(injected_fields);
-  int ctrl = w.position();
+  int jump_table_offset_pos = w.position();
   if (java_fields > JUMP_TABLE_STRIDE) {
-    ctrl += sizeof(uint32_t);
+    w.set_position(w.position() + sizeof(uint32_t));
   }
-  w.set_position(ctrl + fields->length());
   for (int i = 0; i < fields->length(); i++) {
     FieldInfo* fi = fields->adr_at(i);
-    int pre = w.position();
-    assert(i == 0 || i >= java_fields || i % JUMP_TABLE_STRIDE != 0 || pre == positions[i / JUMP_TABLE_STRIDE - 1], "must be");
+    assert(i == 0 || i >= java_fields || i % JUMP_TABLE_STRIDE != 0 ||
+      w.position() == positions[i / JUMP_TABLE_STRIDE - 1], "must be");
     writer.map_field_info(*fi);
-    int post = w.position();
-    u1 control_byte = static_cast<u1>(post - pre);
-    assert(control_byte < 64, "size should fit in 6 bits");
-    if (fi->field_flags().is_injected()) {
-      control_byte |= INJECTED_FIELD;
-    }
-    w.array()->at_put(ctrl + i, control_byte);
   }
   if (java_fields > JUMP_TABLE_STRIDE) {
     *reinterpret_cast<uint32_t*>(w.array()->adr_at(jump_table_offset_pos)) = checked_cast<uint32_t>(w.position());
@@ -159,7 +149,6 @@ Array<u1>* FieldInfoStream::create_FieldInfoStream(ConstantPool* constants, Grow
   if (java_fields > JUMP_TABLE_STRIDE) {
     r.skip_bytes(sizeof(uint32_t));
   }
-  r.skip_bytes(jfc + ifc);
   for (int i = 0; i < jfc + ifc; i++) {
     FieldInfo fi;
     r.read_field_info(fi);
@@ -193,7 +182,6 @@ GrowableArray<FieldInfo>* FieldInfoStream::create_FieldInfoArray(const Array<u1>
   if (*java_fields_count > JUMP_TABLE_STRIDE) {
     r.skip_bytes(sizeof(uint32_t));
   }
-  r.skip_bytes(length);
   while (r.has_next()) {
     FieldInfo fi;
     r.read_field_info(fi);
@@ -211,7 +199,6 @@ void FieldInfoStream::print_from_fieldinfo_stream(Array<u1>* fis, outputStream* 
   if (java_fields_count > JUMP_TABLE_STRIDE) {
     r.skip_bytes(sizeof(uint32_t));
   }
-  r.skip_bytes(java_fields_count + injected_fields_count);
   while (r.has_next()) {
     FieldInfo fi;
     r.read_field_info(fi);

@@ -216,44 +216,87 @@ void FieldInfoStream::print_from_fieldinfo_stream(Array<u1>* fis, outputStream* 
   }
 }
 
-int FieldInfoReader::search_table_lookup(const Array<u1> *search_table, const Symbol *name, const Symbol *signature, ConstantPool *cp, int java_fields) {
-  UNSIGNED5::Reader<const u1*, int> r2(_r.array());
-  int low = 0, high = java_fields - 1;
-  int position_width = _r.limit() > UINT16_MAX + 1 ? 3 : 2;
-  int item_width = position_width  + (java_fields > UINT8_MAX + 1 ? 2 : 1);
-  auto read_position = _r.limit() > UINT16_MAX + 1 ?
-    [](const u1 *ptr) { return (int) ptr[0] + (((int) ptr[1] << 8)) + (((int) ptr[2]) << 16); } :
-    [](const u1 *ptr) { return (int) *reinterpret_cast<const u2 *>(ptr); };
-  while (low <= high) {
-    int mid = low + (high - low) / 2;
-    const u1 *ptr = search_table->data() + item_width * mid;
-    int position = read_position(ptr);
-    r2.set_position(position);
-    Symbol *mid_name = cp->symbol_at(checked_cast<u2>(r2.next_uint()));
-    Symbol *mid_sig = cp->symbol_at(checked_cast<u2>(r2.next_uint()));
+class SearchTableVisitor {
+public:
+  virtual int element_width(void) const = 0;
+  virtual int compare_to(const u1* ptr) = 0;
+};
 
-    if (mid_name == name && mid_sig == signature) {
-      _r.set_position(position);
-      _next_index = java_fields > UINT8_MAX + 1 ?
-        *reinterpret_cast<const u2 *>(ptr + position_width) : ptr[position_width];
-      return _next_index;
-    }
+class SearchTable: AllStatic {
+public:
+  static const u1 *lookup(const Array<u1> *array, SearchTableVisitor* visitor) {
+    int element_width = visitor->element_width();
+    int low = 0, high = (array->length() / element_width) - 1;
+    while (low <= high) {
+      int mid = low + (high - low) / 2;
+      const u1 *ptr = array->data() + element_width * mid;
 
-    int cmp = name->fast_compare(mid_name);
-    if (cmp < 0) {
-      high = mid - 1;
-      continue;
-    } else if (cmp > 0) {
-      low = mid + 1;
-      continue;
+      int cmp = visitor->compare_to(ptr);
+      if (cmp == 0) {
+        return ptr;
+      } else if (cmp < 0) {
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
     }
-    cmp = signature->fast_compare(mid_sig);
-    assert(cmp != 0, "Equality check above did not match");
-    if (cmp < 0) {
-      high = mid - 1;
-    } else {
-      low = mid + 1;
-    }
+    return nullptr;
   }
-  return -1;
+};
+
+class FieldSearchTableVisitor: public SearchTableVisitor {
+private:
+  ConstantPool* _cp;
+  const Symbol *_name;
+  const Symbol *_signature;
+  UNSIGNED5::Reader<const u1*, int> _reader;
+  int _position_width;
+  int _index_width;
+  int (*_read_position)(const u1 *ptr);
+public:
+  FieldSearchTableVisitor(ConstantPool* cp, const Symbol *name, const Symbol *signature, const u1* fis, int fis_length, int java_fields):
+    _cp(cp), _name(name), _signature(signature), _reader(fis, fis_length) {
+    assert(fis_length <= (1 << 24), "Supports only positions up to 2^24 - 1");
+    assert(java_fields <= (1 << 16), "Suports only up to 2^16 fields");
+    if (fis_length > UINT16_MAX + 1) {
+      _position_width = 3;
+      _read_position = [](const u1 *ptr) { return (int) ptr[0] + (((int) ptr[1] << 8)) + (((int) ptr[2]) << 16); };
+    } else {
+      _position_width = 2;
+      _read_position = [](const u1 *ptr) { return (int) *reinterpret_cast<const u2 *>(ptr); };
+    }
+    _index_width = java_fields > UINT8_MAX + 1 ? 2 : 1;
+  }
+
+  int compare_to(const u1* ptr) override {
+    _reader.set_position(_read_position(ptr));
+    Symbol *mid_name = _cp->symbol_at(checked_cast<u2>(_reader.next_uint()));
+    Symbol *mid_sig = _cp->symbol_at(checked_cast<u2>(_reader.next_uint()));
+
+    int cmp = _name->fast_compare(mid_name);
+    return cmp != 0 ? cmp : _signature->fast_compare(mid_sig);
+  }
+
+  int element_width(void) const {
+    return _position_width + _index_width;
+  }
+
+  int visit(const Array<u1>* table, int *position) {
+    const u1* ptr = SearchTable::lookup(table, this);
+    if (ptr == nullptr) {
+      return -1;
+    }
+    *position = _read_position(ptr);
+    return _index_width == 2 ? *reinterpret_cast<const u2 *>(ptr + _position_width) : ptr[_position_width];
+  }
+};
+
+int FieldInfoReader::search_table_lookup(const Array<u1> *search_table, const Symbol *name, const Symbol *signature, ConstantPool *cp, int java_fields) {
+  FieldSearchTableVisitor visitor(cp, name, signature, _r.array(), _r.limit(), java_fields);
+  int position;
+  int index = visitor.visit(search_table, &position);
+  if (index >= 0) {
+    _r.set_position(position);
+  }
+  return index;
 }
